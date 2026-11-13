@@ -5,6 +5,9 @@ on:
   schedule:
     - cron:  '0 0 * * *'
 
+permissions:
+  contents: read
+
 env:
   FILENAME: README.md
 
@@ -15,6 +18,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v2
+        with:
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@v2
