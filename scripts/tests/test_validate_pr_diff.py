@@ -1,11 +1,30 @@
+import os
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from validate.links import find_links_in_file, start_duplicate_links_checker
 from validate.pr_diff import extract_added_lines
+
+
+def fixture_git_environment():
+    """Do not let Git's repository-local environment redirect fixture writes."""
+    # Repository-local names reported by `git rev-parse --local-env-vars`.
+    repository_variables = {
+        'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_CONFIG',
+        'GIT_CONFIG_PARAMETERS', 'GIT_CONFIG_COUNT', 'GIT_OBJECT_DIRECTORY',
+        'GIT_DIR', 'GIT_WORK_TREE', 'GIT_IMPLICIT_WORK_TREE', 'GIT_GRAFT_FILE',
+        'GIT_INDEX_FILE', 'GIT_NO_REPLACE_OBJECTS', 'GIT_REPLACE_REF_BASE',
+        'GIT_PREFIX', 'GIT_SHALLOW_FILE', 'GIT_COMMON_DIR',
+    }
+    return {
+        name: value for name, value in os.environ.items()
+        if name not in repository_variables
+        and not name.startswith(('GIT_CONFIG_KEY_', 'GIT_CONFIG_VALUE_'))
+    }
 
 
 MIXED_DIFF = '''diff --git a/README.md b/README.md
@@ -31,12 +50,13 @@ class TestValidatePrDiff(unittest.TestCase):
         """Generate fixtures with Git itself, without commits or network access."""
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
+            environment = fixture_git_environment()
 
             def git(*arguments):
                 return subprocess.check_output([
                     'git', '-c', 'core.autocrlf=false', '-c', 'core.quotePath=true',
                     *arguments,
-                ], cwd=directory, stderr=subprocess.PIPE)
+                ], cwd=directory, stderr=subprocess.PIPE, env=environment)
 
             git('init', '--quiet')
             for name, content in before.items():
@@ -61,11 +81,13 @@ class TestValidatePrDiff(unittest.TestCase):
     def actual_git_byte_path_diff(self, before, after, binary=False, quote_path=True):
         """Put byte filenames in Git's index without relying on filesystem encoding."""
         with tempfile.TemporaryDirectory() as directory:
+            environment = fixture_git_environment()
+
             def git(*arguments, data=None):
                 return subprocess.check_output([
                     'git', '-c', 'core.quotePath=' + str(quote_path).lower(),
                     *arguments,
-                ], cwd=directory, input=data, stderr=subprocess.PIPE)
+                ], cwd=directory, input=data, stderr=subprocess.PIPE, env=environment)
 
             def stage(files):
                 git('read-tree', '--empty')
@@ -82,6 +104,63 @@ class TestValidatePrDiff(unittest.TestCase):
             options = ['--binary'] if binary else []
             return git('diff', '--cached', '--no-ext-diff', '--no-textconv',
                        '--no-color', *options, tree)
+
+    def test_git_fixtures_leave_caller_repository_unchanged(self):
+        isolated_environment = {
+            name: value for name, value in os.environ.items()
+            if not name.startswith('GIT_')
+        }
+        isolated_environment.update(GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL=os.devnull)
+        for helper_name in ['actual_git_diff', 'actual_git_byte_path_diff']:
+            for scenario in ['index', 'locations', 'objects', 'shallow']:
+                with self.subTest(helper=helper_name, scenario=scenario):
+                    with tempfile.TemporaryDirectory() as directory:
+                        caller = Path(directory) / 'caller'
+                        caller.mkdir()
+
+                        def git(*arguments):
+                            return subprocess.check_output(
+                                ['git', *arguments], cwd=str(caller),
+                                stderr=subprocess.PIPE, env=isolated_environment)
+
+                        def snapshot():
+                            return {
+                                str(path.relative_to(caller)): path.read_bytes()
+                                for path in caller.rglob('*') if path.is_file()
+                            }
+
+                        git('init', '--quiet')
+                        (caller / 'keep.txt').write_bytes(b'Keep staged content\n')
+                        git('add', 'keep.txt')
+                        (caller / 'keep.txt').write_bytes(b'Keep unstaged content\n')
+                        (caller / 'untracked.txt').write_bytes(b'Keep untracked content\n')
+                        shallow = Path(directory) / 'invalid-shallow'
+                        shallow.write_text('invalid shallow entry\n')
+                        variables = {
+                            'index': {'GIT_INDEX_FILE': str(caller / '.git' / 'index')},
+                            'locations': {
+                                'GIT_DIR': str(caller / '.git'),
+                                'GIT_WORK_TREE': str(caller),
+                                'GIT_COMMON_DIR': str(caller / '.git'),
+                                'GIT_INDEX_FILE': str(caller / '.git' / 'index'),
+                                'GIT_OBJECT_DIRECTORY': str(caller / '.git' / 'objects'),
+                                'GIT_ALTERNATE_OBJECT_DIRECTORIES': str(caller / '.git' / 'objects'),
+                                'GIT_PREFIX': 'caller-prefix/',
+                            },
+                            'objects': {
+                                'GIT_OBJECT_DIRECTORY': str(caller / '.git' / 'objects')},
+                            'shallow': {'GIT_SHALLOW_FILE': str(shallow)},
+                        }[scenario]
+                        original = snapshot()
+                        filename = b'README.md' if 'byte_path' in helper_name else 'README.md'
+                        with patch.dict(os.environ, dict(isolated_environment, **variables), clear=True):
+                            diff = getattr(self, helper_name)(
+                                {filename: b'Before\n'},
+                                {filename: b'Before\nAdded fixture content\n'})
+                        self.assertEqual(snapshot(), original)
+                        self.assertEqual(
+                            extract_added_lines(diff.decode('utf-8'), 'README.md'),
+                            ['Added fixture content\n'])
 
     def links_from_additions(self, diff, filename='README.md'):
         with tempfile.TemporaryDirectory() as directory:
