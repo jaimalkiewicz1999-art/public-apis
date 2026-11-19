@@ -62,6 +62,13 @@ or quoted tabs. Unrelated non-UTF-8 text, context and removed lines do not preve
 extraction; selected additions must still be valid UTF-8, or validation fails
 without emitting partial output.
 
+HTTP checks let the client generate the `Host` header for each request, including
+redirects to a different host or port. Pinning the original host can cause false
+redirect loops or errors from the destination. Terminal HTTP errors still fail
+under the existing status and Cloudflare rules; the timeout remains 25 seconds.
+Redirect tests use two loopback HTTP servers and verify both successful redirects
+and failure responses without depending on public sites.
+
 To run all tests it is necessary to change to the scripts directory:
 
 ```bash
