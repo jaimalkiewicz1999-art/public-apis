@@ -58,9 +58,10 @@ link checks. A PR with no README additions has no new links to validate; actual
 duplicate README additions still fail. HTTP download errors fail the script.
 Malformed or incomplete text diffs and binary target files also fail validation.
 Git header separators are removed without changing filenames containing spaces
-or quoted tabs. Unrelated non-UTF-8 text, context and removed lines do not prevent
-extraction; selected additions must still be valid UTF-8, or validation fails
-without emitting partial output.
+or quoted tabs. Quoted filenames preserve their original bytes, including raw
+UTF-8 emitted by `core.quotePath=false`. Unrelated non-UTF-8 filenames, text,
+context and removed lines do not prevent extraction; selected additions must
+still be valid UTF-8, or validation fails without emitting partial output.
 
 HTTP checks let the client generate the `Host` header for each request, including
 redirects to a different host or port. Pinning the original host can cause false

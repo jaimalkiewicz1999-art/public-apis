@@ -26,9 +26,10 @@ BINARY_LINE = re.compile(r'^[A-Za-z][0-9A-Za-z!#$%&()*+;<=>?@^_`{|}~\-]+\n?$')
 def _unquote_path(path: str) -> str:
     if not path.startswith('"'):
         return path
-    decoded = ast.literal_eval(path)
-    # Git quotes non-ASCII paths as octal escapes for their UTF-8 bytes.
-    return decoded.encode('latin-1').decode('utf-8')
+    # Parse Git's byte escapes without losing raw UTF-8 from core.quotePath=false.
+    literal = path.encode('utf-8', errors='surrogateescape').decode('latin-1')
+    decoded = ast.literal_eval(literal)
+    return decoded.encode('latin-1').decode('utf-8', errors='surrogateescape')
 
 
 def _text_header_path(header: str) -> str:

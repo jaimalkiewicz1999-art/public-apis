@@ -15,7 +15,7 @@ env:
 jobs:
   tests:
     name: 'Validate README.md changes'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
         uses: actions/checkout@v2
