@@ -14,6 +14,7 @@ scripts
 └───validate  # validate package
         format.py
         links.py
+        pr_diff.py  # extracts only the requested file's added diff lines
 ```
 
 ## Install dependencies
@@ -49,6 +50,13 @@ $ python scripts/validate/links.py README.md -odlc
 *`-odlc` is an abbreviation of `--only_duplicate_links_checker`*
 
 ## Running Tests
+
+Pull-request validation downloads the complete PR diff, then extracts only added
+lines from the requested file (normally `README.md`). Other files, diff metadata,
+context and removed lines are excluded before the existing duplicate and HTTP
+link checks. A PR with no README additions has no new links to validate; actual
+duplicate README additions still fail. HTTP download errors fail the script.
+Malformed or incomplete text diffs and binary target files also fail validation.
 
 To run all tests it is necessary to change to the scripts directory:
 
