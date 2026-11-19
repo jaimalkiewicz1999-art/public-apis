@@ -64,6 +64,14 @@ class TestValidatePrDiff(unittest.TestCase):
             additions.write_text(''.join(extract_added_lines(diff, filename)), encoding='utf-8')
             return find_links_in_file(str(additions))
 
+    def run_cli(self, diff, filename='README.md'):
+        script = Path(__file__).resolve().parents[1] / 'validate' / 'pr_diff.py'
+        with tempfile.TemporaryDirectory() as directory:
+            (Path(directory) / 'diff.txt').write_bytes(diff)
+            return subprocess.run([
+                sys.executable, str(script), 'diff.txt', filename,
+            ], cwd=directory, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
     def test_other_file_index_and_duplicate_fixtures_do_not_replace_readme_links(self):
         # Exercise the actual link parser, including its existing ## Index handling.
         links = self.links_from_additions(MIXED_DIFF)
@@ -105,6 +113,57 @@ class TestValidatePrDiff(unittest.TestCase):
     def test_quoted_utf8_filename(self):
         diff = MIXED_DIFF.replace('+++ b/README.md', '+++ "b/caf\\303\\251.md"')
         self.assertEqual(len(extract_added_lines(diff, 'café.md')), 2)
+
+    def test_actual_git_spaced_filename_keeps_exact_path(self):
+        added = 'Added https://valid.example\n'
+        for filename in ['API list.md', 'folder with spaces/API list.md', 'API list.md ']:
+            with self.subTest(filename=filename):
+                diff = self.actual_git_diff(
+                    {filename: b'Original\n'},
+                    {filename: b'Original\n' + added.encode('utf-8')},
+                ).decode('utf-8')
+                self.assertIn('+++ b/' + filename + '\t\n', diff)
+                self.assertEqual(extract_added_lines(diff, filename), [added])
+                self.assertEqual(extract_added_lines(diff, filename + '.backup'), [])
+                if filename.endswith(' '):
+                    self.assertEqual(extract_added_lines(diff, filename[:-1]), [])
+
+    def test_quoted_tab_in_filename_is_not_a_header_separator(self):
+        diff = MIXED_DIFF.replace('+++ b/README.md', '+++ "b/API\\tlist.md"')
+        self.assertEqual(len(extract_added_lines(diff, 'API\tlist.md')), 2)
+        self.assertEqual(extract_added_lines(diff, 'APIlist.md'), [])
+
+    def test_actual_git_cli_ignores_unrelated_non_utf8_text(self):
+        added = b'Added https://valid.example\n'
+        before = {'A.txt': b'Original\n', 'README.md': b'Original\n', 'Z.txt': b'Original\n'}
+        diff = self.actual_git_diff(before, {
+            'A.txt': b'Original\ncaf\xe9\n',
+            'README.md': b'Original\n' + added,
+            'Z.txt': b'Original\ncaf\xe9\n',
+        })
+        result = self.run_cli(diff)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, added)
+
+    def test_actual_git_cli_ignores_non_utf8_target_context_and_deletions(self):
+        added = b'Added https://valid.example\n'
+        diff = self.actual_git_diff(
+            {'README.md': b'caf\xe9 context\ncaf\xe9 removed\n'},
+            {'README.md': b'caf\xe9 context\n' + added},
+        )
+        result = self.run_cli(diff)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, added)
+
+    def test_actual_git_cli_rejects_non_utf8_additions_without_partial_output(self):
+        diff = self.actual_git_diff(
+            {'README.md': b'Original\n'},
+            {'README.md': b'Original\nhttps://valid.example\ncaf\xe9 https://invalid.example\n'},
+        )
+        result = self.run_cli(diff)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertEqual(result.stdout, b'')
+        self.assertIn(b'utf-8', result.stderr)
 
     def test_no_target_additions_is_a_valid_empty_result(self):
         unrelated = MIXED_DIFF[MIXED_DIFF.index('diff --git a/scripts/'):]

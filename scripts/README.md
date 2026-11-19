@@ -57,6 +57,10 @@ context and removed lines are excluded before the existing duplicate and HTTP
 link checks. A PR with no README additions has no new links to validate; actual
 duplicate README additions still fail. HTTP download errors fail the script.
 Malformed or incomplete text diffs and binary target files also fail validation.
+Git header separators are removed without changing filenames containing spaces
+or quoted tabs. Unrelated non-UTF-8 text, context and removed lines do not prevent
+extraction; selected additions must still be valid UTF-8, or validation fails
+without emitting partial output.
 
 To run all tests it is necessary to change to the scripts directory:
 

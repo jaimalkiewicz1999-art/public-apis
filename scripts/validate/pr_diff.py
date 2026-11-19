@@ -31,6 +31,15 @@ def _unquote_path(path: str) -> str:
     return decoded.encode('latin-1').decode('utf-8')
 
 
+def _text_header_path(header: str) -> str:
+    path = header[4:].rstrip('\n')
+    # Git separates an unquoted path containing spaces from the line ending with
+    # one TAB. Literal tabs in filenames are quoted; keep filename spaces intact.
+    if path.endswith('\t'):
+        path = path[:-1]
+    return _unquote_path(path)
+
+
 def _binary_targets_file(header: str, metadata: dict, filename: str) -> bool:
     for key in ('rename to', 'copy to'):
         if key in metadata:
@@ -123,7 +132,7 @@ def extract_added_lines(diff: str, filename: str) -> List[str]:
         if state == 'old-header':
             if not line.startswith('+++ '):
                 raise ValueError('Missing new-file header')
-            path = _unquote_path(line[4:].rstrip('\n'))
+            path = _text_header_path(line)
             if path != '/dev/null' and not path.startswith('b/'):
                 raise ValueError('Invalid new-file path')
             selected = path == 'b/' + filename
@@ -140,7 +149,7 @@ def extract_added_lines(diff: str, filename: str) -> List[str]:
             annotation_allowed = False
         elif state == 'metadata':
             if line.startswith('--- '):
-                path = _unquote_path(line[4:].rstrip('\n'))
+                path = _text_header_path(line)
                 if path != '/dev/null' and not path.startswith('a/'):
                     raise ValueError('Invalid old-file path')
                 state = 'old-header'
@@ -181,10 +190,11 @@ def main() -> None:
     args = parser.parse_args()
     try:
         filename = Path(args.filename).resolve().relative_to(Path.cwd().resolve())
-        # Avoid universal-newline translation of CRLF bytes in added file content.
-        with open(args.diff_file, encoding='utf-8', newline='') as source:
+        # Preserve CRLF and unrelated non-UTF-8 bytes until additions are selected.
+        with open(args.diff_file, encoding='utf-8', errors='surrogateescape', newline='') as source:
             diff = source.read()
         additions = ''.join(extract_added_lines(diff, filename.as_posix()))
+        # Validate all selected output before emitting any bytes.
         sys.stdout.buffer.write(additions.encode('utf-8'))
     except (ValueError, SyntaxError) as error:
         parser.error(str(error))
