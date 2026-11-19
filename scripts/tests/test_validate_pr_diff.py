@@ -58,6 +58,31 @@ class TestValidatePrDiff(unittest.TestCase):
             return git('diff', '--cached', '--no-ext-diff', '--no-textconv',
                        '--no-color', '--find-renames=100%', *options, tree)
 
+    def actual_git_byte_path_diff(self, before, after, binary=False, quote_path=True):
+        """Put byte filenames in Git's index without relying on filesystem encoding."""
+        with tempfile.TemporaryDirectory() as directory:
+            def git(*arguments, data=None):
+                return subprocess.check_output([
+                    'git', '-c', 'core.quotePath=' + str(quote_path).lower(),
+                    *arguments,
+                ], cwd=directory, input=data, stderr=subprocess.PIPE)
+
+            def stage(files):
+                git('read-tree', '--empty')
+                entries = []
+                for name, content in files.items():
+                    blob = git('hash-object', '-w', '--stdin', data=content).strip()
+                    entries.append(b'100644 ' + blob + b'\t' + name + b'\0')
+                git('update-index', '-z', '--index-info', data=b''.join(entries))
+
+            git('init', '--quiet')
+            stage(before)
+            tree = git('write-tree').decode().strip()
+            stage(after)
+            options = ['--binary'] if binary else []
+            return git('diff', '--cached', '--no-ext-diff', '--no-textconv',
+                       '--no-color', *options, tree)
+
     def links_from_additions(self, diff, filename='README.md'):
         with tempfile.TemporaryDirectory() as directory:
             additions = Path(directory) / 'additions.txt'
@@ -164,6 +189,104 @@ class TestValidatePrDiff(unittest.TestCase):
         self.assertEqual(result.returncode, 2, result.stderr)
         self.assertEqual(result.stdout, b'')
         self.assertIn(b'utf-8', result.stderr)
+
+    def test_actual_git_cli_ignores_non_utf8_filenames(self):
+        added = b'Added https://valid.example\n'
+        names = [b'A/caf\xe9.txt', b'Z/caf\xff\t.txt']
+        before = {name: b'Original\n' for name in names + [b'README.md']}
+        after = {name: b'Original\nUnrelated\n' for name in names}
+        after[b'README.md'] = b'Original\n' + added
+        for quote_path in [True, False]:
+            with self.subTest(quote_path=quote_path):
+                diff = self.actual_git_byte_path_diff(before, after, quote_path=quote_path)
+                result = self.run_cli(diff)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, added)
+
+    def test_actual_git_cli_ignores_non_utf8_binary_filenames(self):
+        for binary in [False, True]:
+            for quote_path in [True, False]:
+                with self.subTest(binary_patch=binary, quote_path=quote_path):
+                    diff = self.actual_git_byte_path_diff(
+                        {b'A/caf\xe9\t.bin': b'\x00original', b'README.md': b'Original\n'},
+                        {b'A/caf\xe9\t.bin': b'\x00changed',
+                         b'README.md': b'Original\nhttps://valid.example\n'},
+                        binary=binary, quote_path=quote_path,
+                    )
+                    result = self.run_cli(diff)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stdout, b'https://valid.example\n')
+
+    def test_actual_git_quoted_unicode_filenames_keep_exact_bytes(self):
+        for filename in ['café\tREADME.md', '\U0001f9ea\tREADME.md', 'café"README.md']:
+            for quote_path in [True, False]:
+                with self.subTest(filename=filename, quote_path=quote_path):
+                    name = filename.encode('utf-8')
+                    diff = self.actual_git_byte_path_diff(
+                        {name: b'Original\n'},
+                        {name: b'Original\nhttps://valid.example\n'},
+                        quote_path=quote_path,
+                    )
+                    self.assertIn(b'+++ "', diff)
+                    result = self.run_cli(diff, filename)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stdout, b'https://valid.example\n')
+                    self.assertEqual(extract_added_lines(
+                        diff.decode('utf-8'), filename + '.backup'), [])
+
+    def test_actual_git_filename_bytes_do_not_match_utf8_or_replacement(self):
+        for filename, unrelated in [('café.txt', b'caf\xe9.txt'),
+                                    ('target\ufffd.txt', b'target\xff.txt')]:
+            for quote_path in [True, False]:
+                with self.subTest(filename=filename, quote_path=quote_path):
+                    name = filename.encode('utf-8')
+                    diff = self.actual_git_byte_path_diff(
+                        {name: b'Original\n', unrelated: b'Original\n'},
+                        {name: b'Original\nSelected\n', unrelated: b'Original\nOther\n'},
+                        quote_path=quote_path,
+                    )
+                    result = self.run_cli(diff, filename)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stdout, b'Selected\n')
+                    self.assertEqual(extract_added_lines(
+                        diff.decode('utf-8', errors='surrogateescape'),
+                        unrelated.decode('utf-8', errors='surrogateescape')), ['Other\n'])
+
+    def test_actual_git_non_utf8_filename_keeps_strict_target_utf8(self):
+        diff = self.actual_git_byte_path_diff(
+            {b'A\xff.txt': b'Original\n', b'README.md': b'Original\n'},
+            {b'A\xff.txt': b'Original\nOther\n',
+             b'README.md': b'Original\nhttps://valid.example\nInvalid\xff\n'},
+        )
+        result = self.run_cli(diff)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertEqual(result.stdout, b'')
+        self.assertIn(b'surrogates not allowed', result.stderr)
+
+    def test_actual_git_non_utf8_filename_keeps_binary_target_rejection(self):
+        for binary in [False, True]:
+            with self.subTest(binary_patch=binary):
+                diff = self.actual_git_byte_path_diff(
+                    {b'A\xff.txt': b'Original\n', b'README.md': b'Original\n'},
+                    {b'A\xff.txt': b'Original\nOther\n', b'README.md': b'\x00changed'},
+                    binary=binary,
+                )
+                result = self.run_cli(diff)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertEqual(result.stdout, b'')
+                self.assertIn(b'binary target file', result.stderr)
+
+    def test_actual_git_non_utf8_filename_keeps_truncated_hunk_rejection(self):
+        diff = self.actual_git_byte_path_diff(
+            {b'README.md': b'Original\n', b'Z\xff.txt': b'Original\n'},
+            {b'README.md': b'Original\nhttps://valid.example\n',
+             b'Z\xff.txt': b'Original\nOther\n'},
+        )
+        self.assertTrue(diff.endswith(b'+Other\n'))
+        result = self.run_cli(diff[:-len(b'+Other\n')])
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertEqual(result.stdout, b'')
+        self.assertIn(b'Incomplete diff file or hunk', result.stderr)
 
     def test_no_target_additions_is_a_valid_empty_result(self):
         unrelated = MIXED_DIFF[MIXED_DIFF.index('diff --git a/scripts/'):]
