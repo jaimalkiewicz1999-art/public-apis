@@ -15,6 +15,106 @@ from validate.format import check_file_format, min_entries_per_category, num_seg
 
 
 class TestValidadeFormat(unittest.TestCase):
+
+    @staticmethod
+    def catalog(entries=None, separator='|:---|---:|:---:|---|:---|', preamble=None):
+        return (preamble or []) + [
+            '## Index',
+            '* [Test Category](#test-category)',
+            '',
+            '### Test Category',
+            '| API | Description | Auth | HTTPS | CORS |',
+            separator,
+        ] + (entries if entries is not None else [
+            '| [Alpha](https://alpha.example) | First service | No | Yes | Unknown |',
+            '| [Beta](https://beta.example) | Second service | `apiKey` | Yes | Yes |',
+            '| [Gamma](https://gamma.example) | Third service | No | No | No |',
+        ])
+
+    def test_catalog_ignores_introductory_non_catalog_tables(self):
+        preamble = [
+            '### Featured services',
+            '| Service | Description | Link |',
+            '|:---|:---|:---|',
+            '| [Example](https://example.test) | Featured service | Try it |',
+            '## MCP Servers',
+            '| Name | Description | Auth | Transport | Install |',
+            '|:---|:---|:---|:---|:---|',
+            '| [Tool](https://tool.example) | Agent tool | No | `stdio` | npm |',
+        ]
+        lines = self.catalog(preamble=preamble)
+        self.assertEqual(check_file_format(lines), [])
+        categories, locations = get_categories_content(lines)
+        self.assertEqual(categories, {'Test Category': ['ALPHA', 'BETA', 'GAMMA']})
+        self.assertEqual(locations, {'Test Category': len(preamble) + 3})
+
+    def test_catalog_accepts_markdown_alignment_and_header_rows(self):
+        for separator in [
+            '|---|---|---|---|---|',
+            '|:---|---:|:---:|---|:---|',
+            '| :--- | ---: | :---: | --- | :--- |',
+        ]:
+            with self.subTest(separator=separator):
+                self.assertEqual(check_file_format(self.catalog(separator=separator)), [])
+
+    def test_catalog_keeps_validation_of_invalid_api_rows(self):
+        lines = self.catalog()
+        lines[-1] = '| [Gamma](https://gamma.example) | Third service | No | Unknown | No |'
+        self.assertEqual(check_file_format(lines), ['(L009) Unknown is not a valid HTTPS option'])
+
+    def test_catalog_does_not_skip_data_that_looks_like_separator(self):
+        lines = self.catalog()
+        lines[-1] = '| --- | Valid description | No | Yes | No |'
+        self.assertEqual(check_file_format(lines), ['(L009) Title syntax should be "[TITLE](LINK)"'])
+
+    def test_catalog_rejects_extra_columns(self):
+        lines = self.catalog()
+        lines[-1] = '| [Gamma](https://gamma.example) | Third service | No | Yes | No | Optional | Extra |'
+        self.assertEqual(check_file_format(lines), [
+            '(L009) entry has too many columns (have 7, maximum 6)'
+        ])
+
+    def test_catalog_rejects_extra_boundary_cells_in_table_metadata(self):
+        lines = self.catalog()
+        lines[4] = '|| API | Description | Auth | HTTPS | CORS ||'
+        lines[5] = '||---|---|---|---|---||'
+        self.assertEqual(check_file_format(lines), [
+            '(L005) entry has too many columns (have 7, maximum 6)',
+            '(L006) entry has too many columns (have 7, maximum 6)',
+        ])
+
+    def test_catalog_reports_bare_table_delimiter_without_crashing(self):
+        lines = self.catalog()
+        lines[-1] = '|'
+        self.assertEqual(check_file_format(lines), [
+            '(L009) entry does not have all the required columns (have 0, need 5)'
+        ])
+
+    def test_catalog_allows_documented_optional_postman_column(self):
+        lines = self.catalog()
+        lines[4] = '| API | Description | Auth | HTTPS | CORS | Call this API |'
+        lines[5] = '|:---|:---|:---|:---|:---|:---|'
+        lines[6:] = [row + ' [Collection](https://postman.example) |' for row in lines[6:]]
+        self.assertEqual(check_file_format(lines), [])
+
+    def test_catalog_reports_empty_description_without_crashing(self):
+        lines = self.catalog()
+        lines[-1] = '| [Gamma](https://gamma.example) |  | No | Yes | No |'
+        errors = check_file_format(lines)
+        self.assertIn('(L009) description must not be empty', errors)
+
+    def test_catalog_checks_final_category_minimum_without_counting_metadata(self):
+        lines = self.catalog()[:-1]
+        self.assertEqual(check_file_format(lines), [
+            '(L004) Test Category category does not have the minimum 3 entries (only has 2)'
+        ])
+
+    def test_catalog_keeps_ordering_checks_after_ignoring_preamble(self):
+        lines = self.catalog(preamble=['### Featured services'])
+        lines[-1], lines[-2] = lines[-2], lines[-1]
+        self.assertEqual(check_file_format(lines), [
+            '(L005) Test Category category is not alphabetical order'
+        ])
     
     def test_error_message_return_and_return_type(self):
         line_num_unity = 1

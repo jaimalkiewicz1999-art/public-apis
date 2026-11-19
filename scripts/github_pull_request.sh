@@ -31,13 +31,13 @@ echo "running on Pull Request #$GITHUB_PULL_REQUEST"
 # Trick the URL validator python script into not seeing this as a URL
 DUMMY_SCHEME="https"
 DIFF_URL="$DUMMY_SCHEME://patch-diff.githubusercontent.com/raw/$GITHUB_REPOSITORY/pull/$GITHUB_PULL_REQUEST.diff"
-curl -L "$DIFF_URL" -o diff.txt
+curl --fail -L "$DIFF_URL" -o diff.txt
 
 # Construct diff
 echo "------- BEGIN DIFF -------"
 cat diff.txt
 echo "-------- END DIFF --------"
-cat diff.txt | egrep "\+" > additions.txt
+python scripts/validate/pr_diff.py diff.txt "$FILENAME" > additions.txt
 
 echo "------ BEGIN ADDITIONS -----"
 cat additions.txt

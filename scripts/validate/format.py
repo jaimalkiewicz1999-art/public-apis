@@ -24,14 +24,36 @@ num_segments = 5
 min_entries_per_category = 3
 max_description_length = 100
 
-anchor_re = re.compile(anchor + '\s(.+)')
-category_title_in_index_re = re.compile('\*\s\[(.*)\]')
-link_re = re.compile('\[(.+)\]\((http.*)\)')
+anchor_re = re.compile(anchor + r'\s(.+)')
+category_title_in_index_re = re.compile(r'\*\s\[(.*)\]')
+link_re = re.compile(r'\[(.+)\]\((http.*)\)')
+table_separator_cell_re = re.compile(r':?-{3,}:?')
+api_table_header = ['API', 'Description', 'Auth', 'HTTPS', 'CORS']
 
 # Type aliases
 APIList = List[str]
 Categories = Dict[str, APIList]
 CategoriesLineNumber = Dict[str, int]
+
+
+def catalog_start_line(lines: List[str]) -> int:
+    """Keep introductory tables outside the API catalog, retaining line numbers."""
+    return next((index for index, line in enumerate(lines)
+                 if line.strip() == '## Index'), 0)
+
+
+def is_table_metadata(line: str) -> bool:
+    """Recognize API headers and Markdown alignment rows, never data rows."""
+    content = line.strip()
+    if content.startswith('|'):
+        content = content[1:]
+    if content.endswith('|'):
+        content = content[:-1]
+    cells = [cell.strip() for cell in content.split('|')]
+    return cells in (api_table_header, api_table_header + ['Call this API']) or (
+        len(cells) in (num_segments, num_segments + 1) and
+        all(table_separator_cell_re.fullmatch(cell) for cell in cells)
+    )
 
 
 def error_message(line_number: int, message: str) -> str:
@@ -43,8 +65,12 @@ def get_categories_content(contents: List[str]) -> Tuple[Categories, CategoriesL
 
     categories = {}
     category_line_num = {}
+    category = None
+    start_line = catalog_start_line(contents)
 
     for line_num, line_content in enumerate(contents):
+        if line_num < start_line:
+            continue
 
         if line_content.startswith(anchor):
             category = line_content.split(anchor)[1].strip()
@@ -52,17 +78,21 @@ def get_categories_content(contents: List[str]) -> Tuple[Categories, CategoriesL
             category_line_num[category] = line_num
             continue
 
-        if not line_content.startswith('|') or line_content.startswith('|---'):
+        if (not line_content.startswith('|') or is_table_metadata(line_content)
+                or category is None):
             continue
 
-        raw_title = [
+        cells = [
             raw_content.strip() for raw_content in line_content.split('|')[1:-1]
-        ][0]
+        ]
+        if not cells:
+            continue
+        raw_title = cells[0]
 
         title_match = link_re.match(raw_title)
         if title_match:
-                title = title_match.group(1).upper()
-                categories[category].append(title)
+            title = title_match.group(1).upper()
+            categories[category].append(title)
 
     return (categories, category_line_num)
 
@@ -107,6 +137,9 @@ def check_title(line_num: int, raw_title: str) -> List[str]:
 def check_description(line_num: int, description: str) -> List[str]:
 
     err_msgs = []
+
+    if not description:
+        return [error_message(line_num, 'description must not be empty')]
 
     first_char = description[0]
     if first_char.upper() != first_char:
@@ -200,8 +233,11 @@ def check_file_format(lines: List[str]) -> List[str]:
     num_in_category = min_entries_per_category + 1
     category = ''
     category_line = 0
+    start_line = catalog_start_line(lines)
 
     for line_num, line_content in enumerate(lines):
+        if line_num < start_line:
+            continue
 
         category_title_match = category_title_in_index_re.match(line_content)
         if category_title_match:
@@ -222,13 +258,13 @@ def check_file_format(lines: List[str]) -> List[str]:
                 err_msg = error_message(category_line, f'{category} category does not have the minimum {min_entries_per_category} entries (only has {num_in_category})')
                 err_msgs.append(err_msg)
 
-            category = line_content.split(' ')[1]
+            category = line_content[len(anchor):].strip()
             category_line = line_num
             num_in_category = 0
             continue
 
         # skips lines that we do not care about
-        if not line_content.startswith('|') or line_content.startswith('|---'):
+        if not line_content.startswith('|') or is_table_metadata(line_content):
             continue
 
         num_in_category += 1
@@ -236,6 +272,13 @@ def check_file_format(lines: List[str]) -> List[str]:
         if len(segments) < num_segments:
             err_msg = error_message(line_num, f'entry does not have all the required columns (have {len(segments)}, need {num_segments})')
             err_msgs.append(err_msg)
+            continue
+
+        if len(segments) > num_segments + 1:
+            err_msgs.append(error_message(
+                line_num,
+                f'entry has too many columns (have {len(segments)}, maximum {num_segments + 1})'
+            ))
             continue
     
         for segment in segments:
@@ -247,6 +290,12 @@ def check_file_format(lines: List[str]) -> List[str]:
         segments = [segment.strip() for segment in segments]
         entry_err_msgs = check_entry(line_num, segments)
         err_msgs.extend(entry_err_msgs)
+
+    if category and num_in_category < min_entries_per_category:
+        err_msgs.append(error_message(
+            category_line,
+            f'{category} category does not have the minimum {min_entries_per_category} entries (only has {num_in_category})'
+        ))
     
     return err_msgs
 

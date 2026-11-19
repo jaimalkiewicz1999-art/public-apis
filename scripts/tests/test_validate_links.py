@@ -1,9 +1,14 @@
 # -*- coding: utf-8 -*-
 
+import os
 import unittest
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from threading import Thread
+from unittest.mock import patch
 
 from validate.links import find_links_in_text
 from validate.links import check_duplicate_links
+from validate.links import check_if_link_is_working
 from validate.links import fake_user_agent
 from validate.links import get_host_from_link
 from validate.links import has_cloudflare_protection
@@ -170,3 +175,74 @@ class TestValidateLinks(unittest.TestCase):
         self.assertFalse(result1)
         self.assertFalse(result2)
         self.assertFalse(result3)
+
+
+class TestValidateLinkRedirects(unittest.TestCase):
+
+    def setUp(self):
+        # These HTTP fixtures must stay on loopback even in a proxied runner.
+        proxy_bypass = patch.dict(os.environ, {
+            'NO_PROXY': '127.0.0.1',
+            'no_proxy': '127.0.0.1',
+        })
+        proxy_bypass.start()
+        self.addCleanup(proxy_bypass.stop)
+
+    def serve(self, respond):
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                respond(self)
+
+            def log_message(self, format, *args):
+                pass
+
+        server = HTTPServer(('127.0.0.1', 0), Handler)
+        worker = Thread(target=server.serve_forever,
+                        kwargs={'poll_interval': 0.01}, daemon=True)
+        worker.start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(worker.join)
+        self.addCleanup(server.shutdown)
+        return '127.0.0.1:{}'.format(server.server_port)
+
+    def redirect_fixture(self, status):
+        received = []
+
+        def target(request):
+            host = request.headers.get('Host')
+            received.append(('target', host))
+            request.send_response(status if host == target_host else 421)
+            request.send_header('Content-Length', '0')
+            request.end_headers()
+
+        target_host = self.serve(target)
+
+        def source(request):
+            received.append(('source', request.headers.get('Host')))
+            request.send_response(302)
+            request.send_header('Location', 'http://{}/target'.format(target_host))
+            request.send_header('Content-Length', '0')
+            request.end_headers()
+
+        source_host = self.serve(source)
+        link = 'http://{}/source'.format(source_host)
+        expected = [('source', source_host), ('target', target_host)]
+        return link, received, expected
+
+    def test_redirect_uses_each_request_authority_for_host(self):
+        link, received, expected = self.redirect_fixture(200)
+
+        result = check_if_link_is_working(link)
+
+        self.assertEqual(received, expected)
+        self.assertEqual(result, (False, ''))
+
+    def test_redirect_terminal_http_errors_still_fail(self):
+        for status in (404, 503):
+            with self.subTest(status=status):
+                link, received, expected = self.redirect_fixture(status)
+
+                result = check_if_link_is_working(link)
+
+                self.assertEqual(received, expected)
+                self.assertEqual(result, (True, 'ERR:CLT: {} : {}'.format(status, link)))

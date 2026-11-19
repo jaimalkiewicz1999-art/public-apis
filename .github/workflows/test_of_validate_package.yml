@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: [ master ]
 
+permissions:
+  contents: read
+
 jobs:
   unittest:
     name: 'Run tests of validate package'
@@ -14,6 +17,8 @@ jobs:
     steps:
     - name: Checkout repository
       uses: actions/checkout@v2
+      with:
+        persist-credentials: false
 
     - name: Set up Python
       uses: actions/setup-python@v2

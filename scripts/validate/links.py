@@ -164,9 +164,9 @@ def check_if_link_is_working(link: str) -> Tuple[bool, str]:
     error_message = ''
 
     try:
+        # Let the HTTP client derive Host again when a redirect changes authority.
         resp = requests.get(link, timeout=25, headers={
-            'User-Agent': fake_user_agent(),
-            'host': get_host_from_link(link)
+            'User-Agent': fake_user_agent()
         })
 
         code = resp.status_code

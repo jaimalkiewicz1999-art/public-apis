@@ -14,6 +14,7 @@ scripts
 └───validate  # validate package
         format.py
         links.py
+        pr_diff.py  # extracts only the requested file's added diff lines
 ```
 
 ## Install dependencies
@@ -49,6 +50,24 @@ $ python scripts/validate/links.py README.md -odlc
 *`-odlc` is an abbreviation of `--only_duplicate_links_checker`*
 
 ## Running Tests
+
+Pull-request validation downloads the complete PR diff, then extracts only added
+lines from the requested file (normally `README.md`). Other files, diff metadata,
+context and removed lines are excluded before the existing duplicate and HTTP
+link checks. A PR with no README additions has no new links to validate; actual
+duplicate README additions still fail. HTTP download errors fail the script.
+Malformed or incomplete text diffs and binary target files also fail validation.
+Git header separators are removed without changing filenames containing spaces
+or quoted tabs. Unrelated non-UTF-8 text, context and removed lines do not prevent
+extraction; selected additions must still be valid UTF-8, or validation fails
+without emitting partial output.
+
+HTTP checks let the client generate the `Host` header for each request, including
+redirects to a different host or port. Pinning the original host can cause false
+redirect loops or errors from the destination. Terminal HTTP errors still fail
+under the existing status and Cloudflare rules; the timeout remains 25 seconds.
+Redirect tests use two loopback HTTP servers and verify both successful redirects
+and failure responses without depending on public sites.
 
 To run all tests it is necessary to change to the scripts directory:
 
